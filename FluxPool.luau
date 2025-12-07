@@ -2,7 +2,7 @@
 Created by stewhook.
 FluxPool is a modular object pooling library designed for simplicity and scalability.
 Open-source and maintained at: https://github.com/stewhook/FluxPool
-Report any issues at the github above. Feel free to contribute. Godspeed.
+Report any issues to the github above. Feel free to contribute. Godspeed.
 
 __/\\\\\\\\\\\\\\\__/\\\______________/\\\________/\\\__/\\\_______/\\\_        
  _\/\\\///////////__\/\\\_____________\/\\\_______\/\\\_\///\\\___/\\\/__       
@@ -35,8 +35,8 @@ export type Pool<I, O> = {
 	size: number,
 	timeout: number,
 
-	hotSpot: Instance,
-	coldSpot: Instance,
+	hotSpot: Folder,
+	coldSpot: Folder,
 
 	hotStorage: InstanceList<I>,
 	coldStorage: InstanceList<I>,
@@ -152,8 +152,8 @@ function Pool.new<I, O>(
 	size: number, -- Max size of the pool.
 	factoryFunction: FactoryFn<I>, -- The de-facto core function that creates the "template" of an object.
 	timeout: number?, -- Optional timeout, auto stores objects after a set amount of time.
-	hotStorage: Instance?,
-	coldStorage: Instance?
+	hotStorage: Instance?, -- Optional folder, this is where active objects go for organiztion.
+	coldStorage: Instance? -- Optional folder, this is where inactive objects go for organiztion.
 ): Pool<I, O>
 	local self = setmetatable({}, Pool) :: Pool<I, O>
 
@@ -167,8 +167,8 @@ function Pool.new<I, O>(
 	self.active = true
 	self.size = size
 	self.timeout = timeout
-	self.hotSpot = hotStorage :: Instance
-	self.coldSpot = coldStorage :: Instance
+	self.hotSpot = hotStorage :: Folder
+	self.coldSpot = coldStorage :: Folder
 	self.hotStorage = {} :: InstanceList<I>
 	self.coldStorage = {} :: InstanceList<I>
 	self.connections = {} :: ConnectionMap<I>
