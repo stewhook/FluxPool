@@ -25,7 +25,7 @@ Wally install logic etc etc
 ## 👀 Usage
 ### Importing Flux
 ```luau
-local Flux = require(ReplicatedStorage.FluxPool)
+local Flux = require(ReplicatedStorage.Flux)
 ```
 ### Creating & Configuring a Pool
 Building the pool foundation.
