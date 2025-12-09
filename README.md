@@ -106,6 +106,8 @@ pool:store(instance)
 
 ## ⚙️ Installation
 ### Install from Roblox
-You can download the model from Roblox here.
+[Download the model from the Roblox library.](https://create.roblox.com/store/asset/120278572872003/Flux)
 ### Install from Wally
-Wally install logic etc etc
+```
+Not on wally yet, one sec.
+```
