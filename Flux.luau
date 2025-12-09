@@ -1,4 +1,5 @@
 --[[
+v1.1.0
 Created by stewhook.
 Flux is a modular object pooling framework designed for simplicity and scalability.
 Open-source and maintained at: https://github.com/stewhook/FluxPool
@@ -13,6 +14,7 @@ __/\\\\\\\\\\\\\\\__/\\\______________/\\\________/\\\__/\\\_______/\\\_
       _\/\\\_____________\/\\\_____________\//\\\______/\\\_____/\\\////\\\___  
        _\/\\\_____________\/\\\\\\\\\\\\\\\__\///\\\\\\\\\/____/\\\/___\///\\\_ 
         _\///______________\///////////////_____\/////////_____\///_______\///__
+
 ]]--
 
 --!strict
@@ -22,7 +24,7 @@ Pool.__index = Pool
 
 -- Generic helpers / types
 
-export type InstanceList<I> = { I? } -- ring buffers will have nil holes
+export type InstanceList<I> = { I? }
 export type ConnectionMap<I> = { [I]: RBXScriptConnection }
 export type TimeoutMap<I> = { [I]: number }
 export type FactoryFn<I> = () -> I
@@ -36,6 +38,7 @@ export type Queue<I> = {
 	tail: number,
 	count: number,
 	buffer: InstanceList<I>,
+	free: { number },
 }
 
 export type IndexInfo<I> = {
@@ -47,27 +50,16 @@ export type IndexMap<I> = { [I]: IndexInfo<I> }
 
 -- Pool type: I = instance type, O = options type
 export type Pool<I, O> = {
+	-- Config
 	active: boolean,
 	size: number,
 	timeout: number,
 
-	_hotSpot: Instance?,
-	_coldSpot: Instance?,
+	-- Parent Containers (Default to Replicated Storage + Workspace)
+	hotSpot: Instance?,
+	coldSpot: Instance?,
 
-	_hotQueue: Queue<I>,
-	_coldQueue: Queue<I>,
-	_indexMap: IndexMap<I>,
-
-	-- Exposed mainly for debugging/introspection, necessary imo.
-	hotStorage: InstanceList<I>,
-	coldStorage: InstanceList<I>,
-
-	connections: ConnectionMap<I>,
-	activeTimeouts: TimeoutMap<I>,
-
-	factoryFunction: FactoryFn<I>,
-
-	-- Public API
+	-- Public API surface
 	construct: (
 		self: Pool<I, O>,
 		constructFunction: ConstructFn<I, O>,
@@ -75,11 +67,24 @@ export type Pool<I, O> = {
 	) -> I?,
 	store: (self: Pool<I, O>, part: I) -> (),
 	wipe: (self: Pool<I, O>, cleanupFunction: CleanupFn<I>) -> (),
+	getIdleCount: (self: Pool<I, O>) -> number,
+	getActiveCount: (self: Pool<I, O>) -> number,
+}
+
+type InternalPool<I, O> = Pool<I, O> & {
+	_hotQueue: Queue<I>,
+	_coldQueue: Queue<I>,
+	_indexMap: IndexMap<I>,
+
+	connections: ConnectionMap<I>,
+	activeTimeouts: TimeoutMap<I>,
+
+	factoryFunction: FactoryFn<I>,
 }
 
 -- Private helpers
 
-local function _getQueue<I, O>(self: Pool<I, O>, which: QueueName): Queue<I>
+local function _getQueue<I, O>(self: InternalPool<I, O>, which: QueueName): Queue<I>
 	if which == "hot" then
 		return self._hotQueue
 	else
@@ -87,13 +92,11 @@ local function _getQueue<I, O>(self: Pool<I, O>, which: QueueName): Queue<I>
 	end
 end
 
--- Total number of instances known to the pool
-local function _getInstanceTotal<I, O>(self: Pool<I, O>): number
+local function _getInstanceTotal<I, O>(self: InternalPool<I, O>): number
 	return self._hotQueue.count + self._coldQueue.count
 end
 
--- Decide whether or not to create an instance from scratch using the factoryFn.
-local function _needConstruct<I, O>(self: Pool<I, O>, amount: number?): boolean
+local function _needConstruct<I, O>(self: InternalPool<I, O>, amount: number?): boolean
 	amount = amount or 1
 	local instanceCount = _getInstanceTotal(self)
 	if instanceCount + (amount :: number) > self.size then
@@ -102,31 +105,41 @@ local function _needConstruct<I, O>(self: Pool<I, O>, amount: number?): boolean
 	return true
 end
 
--- Enqueue in O(1) into the chosen queue
-local function _enqueue<I, O>(self: Pool<I, O>, which: QueueName, obj: I)
+local function _enqueue<I, O>(self: InternalPool<I, O>, which: QueueName, obj: I)
 	local queue = _getQueue(self, which)
 
 	if queue.count >= self.size then
 		error("[FluxPool] Internal queue overflow; more instances than pool size.")
 	end
 
-	local tail = queue.tail + 1
-	if tail > self.size then
-		tail = 1
+	local index: number
+	local free: {number} = queue.free
+
+	if #free > 0 then
+		local popped = table.remove(free)
+		if popped == nil then
+			error("[FluxPool] free list empty despite #free > 0")
+		end
+		index = popped -- now index: number
+	else
+		local tail = queue.tail + 1
+		if tail > self.size then
+			tail = 1
+		end
+		queue.tail = tail
+		index = tail
 	end
 
-	queue.tail = tail
-	queue.buffer[tail] = obj
+	queue.buffer[index] = obj
 	queue.count += 1
 
 	self._indexMap[obj] = {
 		queue = which,
-		index = tail,
+		index = index,
 	}
 end
 
--- Skips nil holes created by removals.
-local function _dequeue<I, O>(self: Pool<I, O>, which: QueueName): I?
+local function _dequeue<I, O>(self: InternalPool<I, O>, which: QueueName): I?
 	local queue = _getQueue(self, which)
 	if queue.count == 0 then
 		return nil
@@ -138,7 +151,6 @@ local function _dequeue<I, O>(self: Pool<I, O>, which: QueueName): I?
 		local head = queue.head
 		local obj = queue.buffer[head]
 
-		-- Advance head
 		local nextHead = head + 1
 		if nextHead > size then
 			nextHead = 1
@@ -149,7 +161,8 @@ local function _dequeue<I, O>(self: Pool<I, O>, which: QueueName): I?
 			queue.buffer[head] = nil
 			queue.count -= 1
 
-			-- Clear index entry if present
+			table.insert(queue.free, head)
+
 			local info = self._indexMap[obj]
 			if info ~= nil then
 				self._indexMap[obj] = nil
@@ -157,33 +170,39 @@ local function _dequeue<I, O>(self: Pool<I, O>, which: QueueName): I?
 
 			return obj
 		end
-		-- if obj is nil, keep looping until one is found. If cout > 0 there is an instance somewhere.
 	end
 
 	return nil
 end
 
-local function _removeFromQueues<I, O>(self: Pool<I, O>, part: I): ()
+local function _removeFromQueues<I, O>(self: InternalPool<I, O>, part: I): boolean
 	local info = self._indexMap[part]
 	if info == nil then
-		error("[FluxPool] There is no instance in any queue.")
-		return
+		return false
 	end
 
 	local queue = _getQueue(self, info.queue)
 	local index = info.index
 	local stored = queue.buffer[index]
 
-	if stored ~= nil then
+	if stored == part then
 		queue.buffer[index] = nil
-		queue.count -= 1
+		if queue.count > 0 then
+			queue.count -= 1
+		end
+
+		table.insert(queue.free, index)
+
+		self._indexMap[part] = nil
+		return true
 	end
 
+	warn("[FluxPool] Cleaning up stale index reference for", part)
 	self._indexMap[part] = nil
+	return false
 end
 
--- Take the oldest instance, preferring cold over hot
-local function _queueTake<I, O>(self: Pool<I, O>): I?
+local function _queueTake<I, O>(self: InternalPool<I, O>): I?
 	local obj = _dequeue(self, "cold")
 	if obj ~= nil then
 		return obj
@@ -197,22 +216,22 @@ local function _queueTake<I, O>(self: Pool<I, O>): I?
 	error("[FluxPool] There is no instance in any storage to take.")
 end
 
-local function _removeTimeout<I, O>(self: Pool<I, O>, part: I): ()
+local function _removeTimeout<I, O>(self: InternalPool<I, O>, part: I): ()
 	if not self.activeTimeouts[part] then
 		return
 	end
 	self.activeTimeouts[part] = nil
 end
 
-local function _startTimeout<I, O>(self: Pool<I, O>, part: I): ()
+local function _startTimeout<I, O>(self: InternalPool<I, O>, part: I): ()
 	if self.timeout <= 0 then
 		return
-	end -- Timeout of 0 equals no timeout.
+	end
 
 	self.activeTimeouts[part] = DateTime.now().UnixTimestamp + self.timeout
 end
 
-local function _destroyListener<I, O>(self: Pool<I, O>, part: I): ()
+local function _destroyListener<I, O>(self: InternalPool<I, O>, part: I): ()
 	if self.connections[part] then
 		return
 	end
@@ -235,24 +254,23 @@ end
 -- Public API
 
 function Pool.new<I, O>(
-	size: number, -- Max size of the pool.
-	factoryFunction: FactoryFn<I>, -- The de-facto core function that creates the "template" of an object.
-	timeout: number?, -- Optional timeout, auto stores objects after a set amount of time.
-	hotStorage: Instance?, -- Optional instance, this is where active objects go for organization.
-	coldStorage: Instance? -- Optional instance, this is where inactive objects go for organization.
+	size: number,
+	factoryFunction: FactoryFn<I>,
+	timeout: number?,
+	hotStorage: Instance?,
+	coldStorage: Instance?
 ): Pool<I, O>
-	local self = setmetatable({}, Pool) :: Pool<I, O>
+	local self = setmetatable({}, Pool) :: InternalPool<I, O>
 
 	timeout = timeout or 0
 	if timeout < 0 then
 		timeout = 0
-	end	
+	end
 
-	self.active = true -- Whether or not the object pool is active.
-	self.size = size -- Maximum number of instances in the pool.
-	self.timeout = timeout -- Timeout for auto storage.
+	self.active = true
+	self.size = size
+	self.timeout = timeout
 
-	-- Backing buffers for our ring queues
 	local hotBuffer = {} :: InstanceList<I>
 	local coldBuffer = {} :: InstanceList<I>
 
@@ -261,6 +279,7 @@ function Pool.new<I, O>(
 		tail = 0,
 		count = 0,
 		buffer = hotBuffer,
+		free = {},
 	}
 
 	self._coldQueue = {
@@ -268,31 +287,54 @@ function Pool.new<I, O>(
 		tail = 0,
 		count = 0,
 		buffer = coldBuffer,
+		free = {},
 	}
-
+	
 	self._indexMap = {} :: IndexMap<I>
 
-	-- Expose buffers for debugging/introspection
-	self.hotStorage = hotBuffer
-	self.coldStorage = coldBuffer
-
-	self._hotSpot = hotStorage :: Instance?
-	self._coldSpot = coldStorage :: Instance?
+	self.hotSpot = hotStorage :: Instance?
+	self.coldSpot = coldStorage :: Instance?
 	self.connections = {} :: ConnectionMap<I>
 	self.activeTimeouts = {} :: TimeoutMap<I>
 	self.factoryFunction = factoryFunction
 
-	-- Background timeout loop
 	task.spawn(function()
 		while self.active do
 			local currentTime = DateTime.now().UnixTimestamp
+
+			-- Build list of objects to store to avoid modifying table during iteration
+			local objectsToStore: InstanceList<I> = {}
+
 			for object, timeoutTime in self.activeTimeouts do
-				if currentTime < timeoutTime then
+				if currentTime >= timeoutTime then
+					table.insert(objectsToStore, object)
+				end
+			end
+
+			for _, object in objectsToStore do
+				-- Check if object is still in hot queue before storing
+				local info = self._indexMap[object]
+				if info == nil then
+					_removeTimeout(self, object)
 					continue
 				end
+
+				if info.queue ~= "hot" then
+					_removeTimeout(self, object)
+					continue
+				end
+
+				-- Verify the object is actually at the expected location
+				local queue = self._hotQueue
+				if queue.buffer[info.index] ~= object then
+					_removeTimeout(self, object)
+					continue
+				end
+
 				_removeTimeout(self, object)
 				self:store(object)
 			end
+
 			task.wait(1)
 		end
 	end)
@@ -301,7 +343,7 @@ function Pool.new<I, O>(
 end
 
 function Pool.construct<I, O>(
-	self: Pool<I, O>,
+	self: InternalPool<I, O>,
 	constructFunction: ConstructFn<I, O>,
 	constructOpts: O?
 ): I?
@@ -309,7 +351,6 @@ function Pool.construct<I, O>(
 
 	local object: I?
 
-	-- Decide whether to construct a new instance or recycle from storage
 	if _needConstruct(self) then
 		object = self.factoryFunction()
 	else
@@ -322,35 +363,34 @@ function Pool.construct<I, O>(
 		constructFunction(object :: I, nil)
 	end
 
-	-- Mark as hot (in-use)
 	_enqueue(self, "hot", object :: I)
-	-- Places a .destroyed listener to handle cleanup if something happens.
 	_destroyListener(self, object :: I)
 	_startTimeout(self, object :: I)
 
-	-- Parent to hotSpot if provided
 	local inst = object :: Instance
-	if inst.Parent ~= self._hotSpot then
-		inst.Parent = self._hotSpot
+	if inst.Parent ~= self.hotSpot then
+		inst.Parent = self.hotSpot
 	end
-	
+
 	return object
 end
 
-function Pool.store<I, O>(self: Pool<I, O>, part: I): ()
+function Pool.store<I, O>(self: InternalPool<I, O>, part: I): ()
 	_removeTimeout(self, part :: I)
 
-	_removeFromQueues(self, part :: I)
+	local removed = _removeFromQueues(self, part :: I)
 
-	_enqueue(self, "cold", part :: I)
+	-- Only enqueue to cold if we successfully removed it from a queue
+	-- This prevents double-enqueuing if store() is called multiple times
+	if removed then
+		_enqueue(self, "cold", part :: I)
 
-	local inst = part :: Instance
-	inst.Parent = self._coldSpot
+		local inst = part :: Instance
+		inst.Parent = self.coldSpot
+	end
 end
 
-function Pool.wipe<I, O>(self: Pool<I, O>, cleanupFunction: CleanupFn<I>): ()
-	-- Clean up all hot and cold instances, this does not stop the pool.
-	
+function Pool.wipe<I, O>(self: InternalPool<I, O>, cleanupFunction: CleanupFn<I>): ()
 	local hotBuffer = self._hotQueue.buffer
 	for i = 1, self.size do
 		local obj = hotBuffer[i]
@@ -366,6 +406,14 @@ function Pool.wipe<I, O>(self: Pool<I, O>, cleanupFunction: CleanupFn<I>): ()
 			cleanupFunction(obj :: I)
 		end
 	end
+end
+
+function Pool.getActiveCount<I, O>(self: InternalPool<I, O>): number
+	return self._hotQueue.count :: number
+end
+
+function Pool.getIdleCount<I, O>(self: InternalPool<I, O>): number
+	return self._coldQueue.count :: number
 end
 
 return Pool
