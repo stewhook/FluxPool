@@ -109,5 +109,5 @@ pool:store(instance)
 [Download the model from the Roblox library.](https://create.roblox.com/store/asset/120278572872003/Flux)
 ### Install from Wally
 ```
-Not on wally yet, one sec.
+flux = "stewhook/flux@1.1.4"
 ```
