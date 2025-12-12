@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0
+
+### Added or Changed
+- Added destroy() method.
+
 ## v1.1.4
 
 ### Added or Changed
