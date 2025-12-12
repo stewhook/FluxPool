@@ -1,5 +1,5 @@
 --[[
-v1.1.4
+v1.2.0
 Created by stewhook.
 Flux is a modular object pooling framework designed for simplicity and scalability.
 Open-source and maintained at: https://github.com/stewhook/Flux
@@ -65,6 +65,7 @@ export type Pool<I, O> = {
 		constructOpts: O?
 	) -> I?,
 	store: (self: Pool<I, O>, part: I) -> (),
+	delete: (self: Pool<I, O>, part: I) -> (),
 	wipe: (self: Pool<I, O>, cleanupFunction: CleanupFn<I>) -> (),
 	getIdleCount: (self: Pool<I, O>) -> number,
 	getActiveCount: (self: Pool<I, O>) -> number,
@@ -389,6 +390,16 @@ function Pool.store<I, O>(self: InternalPool<I, O>, part: I): ()
 	end
 end
 
+function Pool.delete<I, O>(self: InternalPool<I,O>, part: I)
+	_removeTimeout(self, part :: I)
+	local removed = _removeFromQueues(self, part:: I)
+	if not removed then
+		return end
+
+	local inst = part :: Instance
+	inst:Destroy()
+end
+
 function Pool.wipe<I, O>(self: InternalPool<I, O>, cleanupFunction: CleanupFn<I>): ()
 	local hotBuffer = self._hotQueue.buffer
 	for i = 1, self.size do
@@ -406,6 +417,7 @@ function Pool.wipe<I, O>(self: InternalPool<I, O>, cleanupFunction: CleanupFn<I>
 		end
 	end
 end
+
 
 function Pool.getActiveCount<I, O>(self: InternalPool<I, O>): number
 	return self._hotQueue.count :: number
